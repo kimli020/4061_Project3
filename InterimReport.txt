@@ -1,0 +1,15 @@
+/****************************************/
+CSCI4061 Fall 2020
+Project 3 - Group 41
+Group members:
+    Minh Bui / bui00011
+    John Kimlinger / kimli020
+    Andrew Trudeau / trude135
+Test Machine: csel-apollo
+/****************************************/
+
+1. Screen capture of the terminal messages showing wget request and its response:
+
+2. Plan for work distribution among group members:
+
+3. Plan for extra credit A and B. If you are planning to implement them, please state your idea/algorithm for each extra    credit options.
