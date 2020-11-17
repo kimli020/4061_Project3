@@ -118,9 +118,7 @@ int readFromDisk(/*necessary arguments*/) {
 
 // Function to receive the request from the client and add to the queue
 void * dispatch(void *arg) {
-  printf("dispatch\n");
   while (1) {
-  
     // Accept client connection
     int fd = accept_connection();
     
@@ -151,8 +149,6 @@ void * dispatch(void *arg) {
 // Function to retrieve the request from the queue, process it and then return a result to the client
 void * worker(void *arg) {
 
- 
-  printf("worker\n");
   int num_requests = 0;
   while (1) {
     sleep(1);
@@ -166,15 +162,17 @@ void * worker(void *arg) {
     request_t req = queue[queue_end];
     queue_end++; 
     num_requests++;
-    return_error( )
+    char* content_type = getContentType(req.request);
+    return_error(req.fd, content_type);    /*int return_result(int fd, char *buf)*/
+
     // Get the data from the disk or the cache (extra credit B)
 
     // Log the request into the file and terminal
 
     // return the result
-    char* content_type = getContentType(req.request);
-    return_result(req.fd, content_type, contents, numbytes);      //defined in utils.c
-    free(content_type);
+//    char* content_type = getContentType(req.request);
+//    return_result(req.fd, content_type, contents, numbytes);      //defined in utils.c
+//    free(content_type);
   }
   return NULL;
 }
