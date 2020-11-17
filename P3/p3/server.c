@@ -124,34 +124,112 @@ void * worker(void *arg) {
 
 int main(int argc, char **argv) {
 
-  // Error check on number of arguments
-  if(argc != 8){
-    printf("usage: %s port path num_dispatcher num_workers dynamic_flag queue_length cache_size\n", argv[0]);
-    return -1;
-  }
+    // Error check on number of arguments
+    if(argc != 8){
+        printf("usage: %s port path num_dispatcher num_workers dynamic_flag queue_length cache_size\n", argv[0]);
+        return -1;
+    }
 
-  // Get the input args
+    // Get the input args
+    int port =  strtol(argv[1], NULL, 10);
+    char *path = arg[2];
+    int num_dispatcher = strtol(argv[3], NULL, 10);
+    int num_workers =  strtol(argv[4], NULL, 10);
+    int dynamic_flag = strtol(argv[5], NULL, 10);
+    int qlen = atoi(argv[6], NULL, 10);
+    int cache_entries = atoi(argv[7], NULL, 10);
 
-  // Perform error checks on the input arguments
+    /*Perform error checks on the input arguments*/
+    //Check for valid Port #'s
+    if (port < 1025 || port > 65535){
+        printf("ERROR: Port # must be between 1025 and 65535 \n");
+        return -1;
+    }
+    
+    //Check # of dispatchers
+    if (num_dispatchers < 1 || num_dispatchers > MAX_THREADS) {
+        printf("Number of dispatchers must be between 1 and %i\n", MAX_THREADS);
+        return -1;
+    }
+    
+    //Check # of workers
+    if (num_workers < 1 || num_workers > MAX_THREADS) {
+        printf("Number of workers must be between 1 and %i\n", MAX_THREADS);
+        return -1;
+    }
+    
+    //check dynamic flag
+    if (dynamic_flag != 0 && dynamic_flag != 1) {
+        printf("ERROR: Dynamic flag should be 0 or 1. (static or dynamic worker thread pool)\n");
+        return -1;
+    }
+    
+    //Check qlen
+    if (qlen < 1 || qlen > MAX_QUEUE_LEN) {
+        printf("Request queue length must be between 1 and %i\n", MAX_QUEUE_LEN);
+        return -1;
+    }
+    
+    //Checks cache_entries
+    if (cache_entries < 1 || cache_entries > MAX_CE) {
+        printf("Number of cache entries must be between 1 and %i\n", MAX_CE);
+         return -1;
+    }
+  
+    //Check path
+    int check = atoi(path);
+    if (check != OK) {  //The argument given for path was not a string path.
+        return INVALID;
+    }
 
-  // Change SIGINT action for grace termination
 
-  // Open log file
+    // Change SIGINT action for grace termination
+    struct sigaction act;
+    act.sa_handler = gracefulTerminate;
+    act.sa_flags = 0;
+    if(sigemptyset(&act.sa_mask) == -1 || sigaction(SIGINT, &act, NULL) == -1){
+        printf("Failed to set SIGINT handler.\n");
+        return -1;
+    } 
 
-  // Change the current working directory to server root directory
+    // Open log file
+    log_file = fopen("./web_server_log", "w");
+    if (log_file == NULL) {
+        perror("Unable to open log file");
+    }
 
-  // Initialize cache (extra credit B)
+    // Change the current working directory to server root directory
+    chdir(path);
 
-  // Start the server
+    // Initialize cache (extra credit B)
 
-  // Create dispatcher and worker threads (all threads should be detachable)
+    // Start the server
+    init(port);
 
-  // Create dynamic pool manager thread (extra credit A)
 
-  // Terminate server gracefully
+
+    // Create dispatcher and worker threads (all threads should be detachable)
+    pthread_t dispatchers[num_dispatcher];
+    pthread_t workers[num_workers];
+    pthread_attr_t attr_detach;
+    pthread_attr_init(&attr_detach);
+    pthread_attr_setdetachstate(&attr_detach, PTHREAD_CREATE_DETACHED);
+    
+    int i;
+    for(i=0; i < num_dispatcher; i++){
+        pthread_create(&dispatcher[i], &attr_detach, dispatch, NULL);
+    }
+
+    for(i=0; i < num_workers; i++){
+        pthread_create(&workers[i], &attr_detach, worker, NULL);
+    }
+
+    // Create dynamic pool manager thread (extra credit A)
+
+    // Terminate server gracefully
     // Print the number of pending requests in the request queue
     // close log file
     // Remove cache (extra credit B)
 
-  return 0;
+    return 0;
 }
