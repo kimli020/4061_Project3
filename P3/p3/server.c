@@ -26,7 +26,7 @@
 */
 
 // structs:
-typedef struct request_queue {
+typedef struct request_queue {  //  This is more like a node/element in the queue
    int fd;
    char *request;
 } request_t;
@@ -37,12 +37,77 @@ typedef struct cache_entry {
     char *content;
 } cache_entry_t;
 
+/*  Queue implementation functions and structs  */
+typedef struct Queue {  //struct for the bounded size buffer
+    int front, rear, size;  // front, rear: index pointing to either end of queue     size: number of actual elements in the queue
+    unsigned capacity;    //  how many elements queue CAN hold (i.e. qlen <= MAX_QUEUE_LEN)
+    request_t* queueArray;    // Pointer to actual array where buffer is implemented
+} queue_t;
+
+//  Create an empty (size = 0) queue with given capacity
+//  Should be called ONCE to init a queue for buffer, then the entire program should operate around this buffer
+queue_t* createQueue(unsigned capacity)  {
+    queue_t* queue = (struct Queue*)malloc(sizeof(struct Queue));
+    queue->capacity = capacity;
+    queue->front = queue->size = 0;
+    queue->rear = capacity - 1;
+    queue->queueArray = (request_t*)malloc(queue->capacity * sizeof(request_t));
+    return queue;   //returns a pointer to queueArray
+}
+int isFull(queue_t* queue) {
+    return (queue->size == queue->capacity);
+}
+int isEmpty(queue_t* queue) {
+    return (queue->size == 0);
+}
+//  Queue: FIFO --> Add to rear, take from front
+//  Enqueue request to rear (i.e. end of queue)
+void enqueue(queue_t* queue, request_t req) {
+    if (isFull(queue))  //return, don't enqueue if queue is full
+        return;     //Maybe we want threads to block if queue is full instead?
+    queue->rear = (queue->rear + 1)%queue->capacity;  //rear++; if rear++ == capacity loops back to 0
+    queue->queueArray[queue->rear] = req;    // Push the latest request to end of queue
+    queue->size = queue->size + 1;        // size++, added one element
+    printf("%s enqueued to queue\n", req.request);
+}
+
+//  Dequeue a request from front of queue, changes front and size--
+request_t dequeue(queue_t* queue)
+{
+    // if (isEmpty(queue))
+    //     return;
+    request_t req = queue->queueArray[queue->front];
+    queue->front = (queue->front + 1)% queue->capacity; // index front++; loops back to 0 if front++ reaches end of queue
+    queue->size = queue->size - 1;  //removed element -> size -= 1
+    return req;
+}
+
+//  Get the indexes currently being the front and rear indexes  of the queue
+int getFrontIndex(queue_t* queue)  {
+    if (isEmpty(queue))
+        return -1;
+    return queue->front;
+}
+
+int getRearIndex(queue_t* queue) {
+    if (isEmpty(queue))
+        return -1;
+    return queue->rear;
+}
+/*********************************************************************/
+
+/*  Queue arguments struct to pass into threads */
+typedef struct queueArg {
+    queue_t* bufferQueue;  // pointer to the queue array (buffer)
+    int MQLen;    //  capacity of the queue array
+} queueArg_t;
+/*********************************************************************/
 
 int logFd;
 int pending_requests = 0;
-request_t queue[MAX_QUEUE_LEN];     //fixed size queue
-int queue_start = 0;
-int queue_end = 0;
+// request_t queue[MAX_QUEUE_LEN];     //fixed size queue
+// int queue_start = 0;
+// int queue_end = 0;
 pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER; // initiliaze to be able to lock and unlock
 
 
@@ -112,11 +177,12 @@ int readFromDisk(/*necessary arguments*/) {
 }
 
 /**********************************************************************************/
-
+int i, j = 1;
 // Function to receive the request from the client and add to the queue
-void * dispatch(void *qlen) {
+void * dispatch(void *queue) {
   while (1) {
-    printf("dispatch running \n");
+    printf("dispatch running %d \n", i);
+    i++;
     // Accept client connection
     int fd = accept_connection();
     // Get request from the client
@@ -128,11 +194,12 @@ void * dispatch(void *qlen) {
           // memset(req.request, '\0', BUFF_SIZE);
           req.fd = fd;
           strcpy(req.request, filename);
-          queue[queue_start] = req;
-          if(queue_start == *(int*)qlen-1)
-            queue_start = 0;
-          else
-            queue_start ++;
+          enqueue((queue_t*)queue, req);
+          // queue[queue_start] = req;
+          // if(queue_start == *(int*)qlen-1)
+          //   queue_start = 0;
+          // else
+          //   queue_start ++;
       }
       else{
         continue;
@@ -148,26 +215,28 @@ void * dispatch(void *qlen) {
 /**********************************************************************************/
 
 // Function to retrieve the request from the queue, process it and then return a result to the client
-void * worker(void *qlen) {
+void * worker(void *queue) {
 
   int num_requests = 0;
   while (1) {
-    printf("worker running \n");
+    printf("worker running %d \n", j);
+    j++;
     sleep(1);
     //if we've handled all requests
-    if(queue_end == queue_start) {
-      continue;
-    }
+    // if(queue_end == queue_start) {
+    //   continue;
+    // }
     // Get the request from the queue
-    request_t req = queue[queue_end];
-    if(queue_end == *(int*)qlen-1)
-      queue_end = 0;
-    else
-      queue_end++;
+    // request_t req = queue[queue_end];
+    // if(queue_end == *(int*)qlen-1)
+    //   queue_end = 0;
+    // else
+    //   queue_end++;
+    request_t req = dequeue(queue);
     num_requests++;
     char* content_type = getContentType(req.request);
 
-    return_error(req.fd, content_type);    /*int return_result(int fd, char *buf)*/
+   return_error(req.fd, content_type);    /*int return_result(int fd, char *buf)*/
 
     // Get the data from the disk or the cache (extra credit B)
 
@@ -184,6 +253,7 @@ void * worker(void *qlen) {
 
 /**********************************************************************************/
 // Will always close the program when called at end of main, not what we want
+// Will be called when ^C is pressed, terminate the server --> what we want
 void handler(int signal){
   printf("Number of pending requests : %d \n", pending_requests);
   close(logFd);
@@ -259,6 +329,11 @@ int main(int argc, char **argv) {
     chdir(path);
     // Initialize cache (extra credit B)
 
+    // Create the buffer queue and init queueArg arguments
+    queue_t* queue = createQueue(qlen);
+    queueArg_t queueArgs;
+    queueArgs.bufferQueue = queue;
+    queueArgs.MQLen = qlen;
     // Start the server
     init(port);
     // Create dispatcher and worker threads (all threads should be detachable)
@@ -270,11 +345,11 @@ int main(int argc, char **argv) {
 
     int i;
     for(i=0; i < num_dispatchers; i++){
-        pthread_create(&dispatchers[i], &attr_detach, dispatch, &qlen);
+        pthread_create(&dispatchers[i], &attr_detach, dispatch, queue);
     }
 
     for(i=0; i < num_workers; i++){
-        pthread_create(&workers[i], &attr_detach, worker, &qlen);
+        pthread_create(&workers[i], &attr_detach, worker, queue);
     }
 
     // Create dynamic pool manager thread (extra credit A)
