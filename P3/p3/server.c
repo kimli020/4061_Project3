@@ -44,6 +44,7 @@ request_t queue[MAX_QUEUE_LEN];
 int queue_start = 0;
 int queue_end = 0;
 pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER; // initiliaze to be able to lock and unlock
+pthread_mutex_t queue_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 
 
@@ -116,62 +117,88 @@ int readFromDisk(/*necessary arguments*/) {
 
 /**********************************************************************************/
 
+/**********************************************************************************/
+/*Helper function to add to queue. Used in dispatch().*/
+int enqueue(request_t result) {
+  //pthread_mutex_lock(&queue_mtx);           //lock
+  queue[queue_end] = result;
+  queue_end++;
+  queue_end = queue_end % (MAX_QUEUE_LEN+1);
+  //pthread_mutex_unlock(&queue_mtx);         //unlock
+  return 0;
+}
+/**********************************************************************************/
+
 // Function to receive the request from the client and add to the queue
 void * dispatch(void *arg) {
   while (1) {
     // Accept client connection
     int fd = accept_connection();
+    if(fd < 0){
+        continue;
+    }
     
     // Get request from the client
-    if(fd > -1) {
-      char filename[BUFF_SIZE];
-      
-      // Add the request into the queue
-      if(get_request(fd, filename) == 0) {
-          request_t req;
-          req.fd = fd;;
-          strcpy(req.request, filename);
-          queue[queue_start] = req;
-          queue_start ++;
-      }else{
-        continue;
-      }
-    }else{
-       continue;
-    }
-
+    char temp[BUFF_SIZE];
+    int request = get_request(fd, temp);
+    if (request != 0) {
+      return_error(fd, "Invalid request.");
+      continue;
+    }  
+    
+    // Add the request into the queue
+    request_t req;
+    req.fd = fd;;
+    strcpy(req.request, filename);
+    enqueue(req);       //call helper function               
   }
-   return NULL;
+  return NULL;
 }
 
+
+/**********************************************************************************/
+/*Helper function for removing from queue. Used in worker().*/
+int dequeue(request_t *result) {
+  //pthread_mutex_lock(&queue_mtx);           //lock
+  *result = queue[queue_start];
+  queue_start++;
+  queue_start = queue_start % (MAX_QUEUE_LEN+1);
+  //pthread_mutex_unlock(&queue_mtx);         //unlock
+  return 0;
+}
 /**********************************************************************************/
 
 // Function to retrieve the request from the queue, process it and then return a result to the client
 void * worker(void *arg) {
-
+  request_t req;  
   int num_requests = 0;
   while (1) {
-    sleep(1);
-   
-    //if we've handled all requests
-    if(queue_end == queue_start) {
-      continue;  
-    }
-
+      
     // Get the request from the queue
-    request_t req = queue[queue_end];
-    queue_end++; 
+    dequeue(&req);
     num_requests++;
-    char* content_type = getContentType(req.request);
-    return_error(req.fd, content_type);    /*int return_result(int fd, char *buf)*/
 
     // Get the data from the disk or the cache (extra credit B)
+    FILE *file = fopen(req.request, "r");
+    if (file == NULL) {
+      return_error(req.fd, "File not found.");
+      continue;
+    }
+    
+    
 
     // Log the request into the file and terminal
 
     // return the result
-//    char* content_type = getContentType(req.request);
-//    return_result(req.fd, content_type, contents, numbytes);      //defined in utils.c
+    struct stat f;
+    stat(req.request, &f);
+    char *buffer = malloc(f.st_size);
+    fread(buffer, sizeof(char), f.st_size, file);
+    char* content_type = getContentType(req.request);
+    return_result(req.fd, content_type, buffer, f.st_size);      //defined in utils.c
+    
+    fclose(file);
+    free(buffer);
 //    free(content_type);
   }
   return NULL;
@@ -260,7 +287,7 @@ int main(int argc, char **argv) {
 
     // Change the current working directory to server root directory
     chdir(path);
-
+    printf("path = %s", path);
     // Initialize cache (extra credit B)
 
     // Start the server
@@ -283,8 +310,12 @@ int main(int argc, char **argv) {
     }
 
     // Create dynamic pool manager thread (extra credit A)
-
+    
+    
     // Terminate server gracefully
+    while(1) {
+        sleep(1);
+    }
     handler(SIGINT);
     
     // Print the number of pending requests in the request queue
