@@ -95,7 +95,7 @@ char* getContentType(char * mybuf) {
   // (See Section 5 in Project description for more details)
   
   
-  //Strings in C are hard...code was moved to dispatch() function. see comments there
+  //Strings in C are hard...code was moved to worker() function. see comments there
 }
 
 // Function to open and read the file from the disk into the memory
