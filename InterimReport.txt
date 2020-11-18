@@ -10,6 +10,14 @@ Test Machine: csel-apollo
 
 1. Screen capture of the terminal messages showing wget request and its response:
 
-2. Plan for work distribution among group members:
+2. Work Distribution:
+Minh - Improving the the current interation of our queue and implementing the dynamic thread pool.
+John - Request Logging
+Andrew - Request Logging 
 
-3. Plan for extra credit A and B. If you are planning to implement them, please state your idea/algorithm for each extra    credit options.
+3. 
+Our group's plan is to implement Extra Credit A: Dynamic worker thread pool
+
+In our implementation of the queue we will keep track of the number of actual elements in it, which is the server load. We will choose an appropriate worker:load ratio (e.g. 10 server requests/1 worker). 
+
+qlen is the max capacity of the queue (i.e. the max server load) so we could initialize by creating enough threads to service, say, 50% of that load. Our dynamic_pool_size_update will routinely check the current server load (i.e. queue size) and adjust the number of workers based on the worker:load ratio we chose. We would not allow thread deletion if there is only one worker.
