@@ -40,12 +40,10 @@ typedef struct cache_entry {
 
 int logFd;
 int pending_requests = 0;
-request_t queue[MAX_QUEUE_LEN];
+request_t queue[MAX_QUEUE_LEN];     //fixed size queue
 int queue_start = 0;
 int queue_end = 0;
 pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER; // initiliaze to be able to lock and unlock
-
-
 
 
 /* ******************** Dynamic Pool Code  [Extra Credit A] **********************/
@@ -64,6 +62,7 @@ void * dynamic_pool_size_update(void *arg) {
 // Function to check whether the given request is present in cache
 int getCacheIndex(char *request){
   /// return the index if the request is present in the cache
+  return 0;
 }
 
 // Function to add the request and its file content into the cache
@@ -89,12 +88,11 @@ void initCache(){
 char* getContentType(char * mybuf) {
   // Should return the content type based on the file type in the request
   // (See Section 5 in Project description for more details)
-  
-  const char* temp = strrchr(mybuf, '.'); 
+  const char* temp = strrchr(mybuf, '.');
   temp += 1;
 
   char* content_type = (char*) malloc(BUFF_SIZE*sizeof(char));
-  
+
   if(!strcmp(temp, "html") || !strcmp(temp, "htm")){
     strcpy(content_type, "text/html");
   } else if (!strcmp(temp, "jpg")){
@@ -105,7 +103,6 @@ char* getContentType(char * mybuf) {
     strcpy(content_type, "text/plain");
   }
   return content_type;
-  
 }
 
 // Function to open and read the file from the disk into the memory
@@ -117,29 +114,33 @@ int readFromDisk(/*necessary arguments*/) {
 /**********************************************************************************/
 
 // Function to receive the request from the client and add to the queue
-void * dispatch(void *arg) {
+void * dispatch(void *qlen) {
   while (1) {
+    printf("dispatch running \n");
     // Accept client connection
     int fd = accept_connection();
-    
     // Get request from the client
-    if(fd > -1) {
+    if(fd > -1) { //valid fd
       char filename[BUFF_SIZE];
-      
       // Add the request into the queue
       if(get_request(fd, filename) == 0) {
           request_t req;
-          req.fd = fd;;
+          // memset(req.request, '\0', BUFF_SIZE);
+          req.fd = fd;
           strcpy(req.request, filename);
           queue[queue_start] = req;
-          queue_start ++;
-      }else{
+          if(queue_start == *(int*)qlen-1)
+            queue_start = 0;
+          else
+            queue_start ++;
+      }
+      else{
         continue;
       }
-    }else{
+    }
+    else{
        continue;
     }
-
   }
    return NULL;
 }
@@ -147,22 +148,25 @@ void * dispatch(void *arg) {
 /**********************************************************************************/
 
 // Function to retrieve the request from the queue, process it and then return a result to the client
-void * worker(void *arg) {
+void * worker(void *qlen) {
 
   int num_requests = 0;
   while (1) {
+    printf("worker running \n");
     sleep(1);
-   
     //if we've handled all requests
     if(queue_end == queue_start) {
-      continue;  
+      continue;
     }
-
     // Get the request from the queue
     request_t req = queue[queue_end];
-    queue_end++; 
+    if(queue_end == *(int*)qlen-1)
+      queue_end = 0;
+    else
+      queue_end++;
     num_requests++;
     char* content_type = getContentType(req.request);
+
     return_error(req.fd, content_type);    /*int return_result(int fd, char *buf)*/
 
     // Get the data from the disk or the cache (extra credit B)
@@ -179,6 +183,7 @@ void * worker(void *arg) {
 
 
 /**********************************************************************************/
+// Will always close the program when called at end of main, not what we want
 void handler(int signal){
   printf("Number of pending requests : %d \n", pending_requests);
   close(logFd);
@@ -209,38 +214,31 @@ int main(int argc, char **argv) {
         printf("ERROR: Port # must be between 1025 and 65535 \n");
         return -1;
     }
-    
     //Check # of dispatchers
     if (num_dispatchers < 1 || num_dispatchers > MAX_THREADS) {
         printf("Number of dispatchers must be between 1 and %i\n", MAX_THREADS);
         return -1;
     }
-    
     //Check # of workers
     if (num_workers < 1 || num_workers > MAX_THREADS) {
         printf("Number of workers must be between 1 and %i\n", MAX_THREADS);
         return -1;
     }
-    
     //check dynamic flag
     if (dynamic_flag != 0 && dynamic_flag != 1) {
         printf("ERROR: Dynamic flag should be 0 or 1. (static or dynamic worker thread pool)\n");
         return -1;
     }
-    
     //Check qlen
     if (qlen < 1 || qlen > MAX_QUEUE_LEN) {
         printf("Request queue length must be between 1 and %i\n", MAX_QUEUE_LEN);
         return -1;
     }
-    
     //Checks cache_entries
     if (cache_entries < 0 || cache_entries > MAX_CE) {
         printf("Number of cache entries must be between 1 and %i\n", MAX_CE);
          return -1;
     }
-  
-
 
     // Change SIGINT action for grace termination
     struct sigaction act;
@@ -249,7 +247,7 @@ int main(int argc, char **argv) {
     if(sigemptyset(&act.sa_mask) == -1 || sigaction(SIGINT, &act, NULL) == -1){
         printf("Failed to set SIGINT handler.\n");
         return -1;
-    } 
+    }
 
     // Open log file
     logFd = open("web_server_log", O_CREAT | O_WRONLY, 0777);
@@ -257,36 +255,35 @@ int main(int argc, char **argv) {
       printf("ERROR: Unable to create web_server_log file \n");
       return -1;
     }
-
     // Change the current working directory to server root directory
     chdir(path);
-
     // Initialize cache (extra credit B)
 
     // Start the server
     init(port);
-
     // Create dispatcher and worker threads (all threads should be detachable)
     pthread_t dispatchers[num_dispatchers];
     pthread_t workers[num_workers];
     pthread_attr_t attr_detach;
     pthread_attr_init(&attr_detach);
     pthread_attr_setdetachstate(&attr_detach, PTHREAD_CREATE_DETACHED);
-    
+
     int i;
     for(i=0; i < num_dispatchers; i++){
-        pthread_create(&dispatchers[i], &attr_detach, dispatch, NULL);
+        pthread_create(&dispatchers[i], &attr_detach, dispatch, &qlen);
     }
 
     for(i=0; i < num_workers; i++){
-        pthread_create(&workers[i], &attr_detach, worker, NULL);
+        pthread_create(&workers[i], &attr_detach, worker, &qlen);
     }
 
     // Create dynamic pool manager thread (extra credit A)
 
     // Terminate server gracefully
-    handler(SIGINT);
-    
+    while(1){
+      // handler(SIGINT);
+    }
+
     // Print the number of pending requests in the request queue
     // close log file
     //fclose(log_file);
