@@ -68,6 +68,7 @@ void * dynamic_pool_size_update(void *arg) {
 // Function to check whether the given request is present in cache
 int getCacheIndex(char *request){
   /// return the index if the request is present in the cache
+  return 0;
 }
 
 // Function to add the request and its file content into the cache
@@ -86,7 +87,7 @@ void initCache(){
   // Allocating memory and initializing the cache array
 }
 
-/**********************************************************************************/
+/***********************************************************************************/
 
 /* ************************************ Utilities ********************************/
 // Function to get the content type from the request
@@ -96,12 +97,14 @@ char* getContentType(char * mybuf) {
   
   
   //Strings in C are hard...code was moved to worker() function. see comments there
+    return 0;
 }
 
 // Function to open and read the file from the disk into the memory
 // Add necessary arguments as needed
 int readFromDisk(/*necessary arguments*/) {
     // Open and read the contents of file given the request
+    return 0;
 }
 
 /**********************************************************************************/
@@ -125,6 +128,7 @@ int enqueue(request_t result) {
 // Function to receive the request from the client and add to the queue
 void * dispatch(void *arg) {
   char temp[BUFF_SIZE];
+
   while (1) {
   
     // Accept client connection
@@ -143,7 +147,10 @@ void * dispatch(void *arg) {
     // Add the request into the queue
     request_t req;
     req.fd = fd;
+    req.request = (char*) malloc(9);
+    fflush(stdout);
     sprintf(req.request, ".%s", temp);
+
     enqueue(req);       //call helper function              
   }
   return NULL;
@@ -153,6 +160,7 @@ void * dispatch(void *arg) {
 /**********************************************************************************/
 /*Helper function for removing from queue. Used in worker().*/
 int dequeue(request_t *result) {
+  
   pthread_mutex_lock(&queue_mtx);           //lock and wait
   while (queue_front == queue_back) {
     pthread_cond_wait(&queue_added, &queue_mtx);
@@ -165,26 +173,37 @@ int dequeue(request_t *result) {
   return 0;
 }
 /**********************************************************************************/
-
 // Function to retrieve the request from the queue, process it and then return a result to the client
 void * worker(void *arg) {
+  int id = *((int *) arg);
   request_t req;
+
   while (1) {
-  
+
     // Get the request from the queue
     dequeue(&req);
+
+    char *buffer = malloc(BUFF_SIZE);
+    strcpy(buffer,req.request);  
+
+    // Size of target file:
+    struct stat st;
+    stat(buffer, &st);
+    int size = st.st_size;
 
     // Get the data from the disk or the cache (extra credit B)
     FILE *file = fopen(req.request, "r");
     if (file == NULL) {
       return_error(req.fd, "File not found.");
+
+      printf("[%d][][%d][%s][%s]\n", id,req.fd,buffer,"File Not Found.");
+      fprintf(logfile, "[%d][][%d][%s][%s]\n", id,req.fd,buffer,"File Not Found.");
+      fflush(logfile);
+      fflush(stdout);
+
       continue;
     }
-    
-    char *buffer = malloc(BUFF_SIZE);
-    strcpy(buffer,req.request);  
-  
-  
+
  /*THE CODE BETWEEN THE ARROWS SHOULD BE IN getContentType, BUT I DON'T KNOW HOW TO PASS THINGS CORRECTLY*/
 //-->     
     char* temp = strrchr(req.request, '.'); 
@@ -194,44 +213,35 @@ void * worker(void *arg) {
       free(buffer);
       continue;
     }
+    
 
 
-    /*THIS WAY OF GETTING THE CONTENT TYPE CAUSES A SEGMENTATION FAULT...why?*/
-/*
-    char content_type = "";
-    if(strcmp(temp, ".html") == 0 ){
-      strcpy(content_type, "text/html");
-    }else if ( strcmp(temp, ".jpg") == 0 ){
-      strcpy(content_type, "image/jpeg");      
-    }else if ( strcmp(temp, ".gif") == 0 ){
-      strcpy(content_type, "image/gif");   
-    }else if( strcmp(temp, ".txt") == 0 ){
-      strcpy(content_type, "text/plain");  
-    }else{
-      printf("error getting file type \n");
-      fclose(file);
-      free(buffer);
-      continue;
-    }
-    return_result(req.fd, content_type, buffer, BUFF_SIZE);      //defined in utils.c  
-*/  
     /*THIS VERSIONS WORKS*/
     if(strcmp(temp, ".html") == 0 ){
-      return_result(req.fd, "text/html", buffer, BUFF_SIZE);
-    }else if ( strcmp(temp, ".jpg") == 0 ){
-      return_result(req.fd, "image/jpeg", buffer, BUFF_SIZE);    
-    }else if ( strcmp(temp, ".gif") == 0 ){
-      return_result(req.fd, "image/gif", buffer, BUFF_SIZE); 
-    }else if( strcmp(temp, ".txt") == 0 ){
-      return_result(req.fd, "text/plain", buffer, BUFF_SIZE); 
-    }else{
+      return_result(req.fd, "text/html", buffer, size);
+    } else if ( strcmp(temp, ".jpg") == 0 ){
+      return_result(req.fd, "image/jpeg", buffer, size);
+    } else if ( strcmp(temp, ".gif") == 0 ){
+      return_result(req.fd, "image/gif", buffer, size);
+    } else if( strcmp(temp, ".txt") == 0 ){
+      return_result(req.fd, "text/plain", buffer, size);
+    } else {
       printf("error getting file type \n");
       fclose(file);
       free(buffer);
       continue;
+      
     }
+
+    // Output: [threadId][reqNum][fd][Request string][bytes/error][Cache HIT/MISS]
+    // What is reqNum?
+   
+    printf("[%d][][%d][%s][%d]\n", id,req.fd,buffer,size);
+    fprintf(logfile, "[%d][][%d][%s][%d]\n", id,req.fd,buffer,size);
+    fflush(logfile);
+    fflush(stdout);
 //-->       
-    
+
     fclose(file);
     free(buffer);
   }
@@ -241,19 +251,23 @@ void * worker(void *arg) {
 
 /**********************************************************************************/
 void handler(int signal){
-  printf("Number of pending requests : %d \n", count);
-  close(logfile);
+  printf("\nNumber of pending requests : %d \n", count);
+  fclose(logfile);
   exit(0);
 }
 
 /**********************************************************************************/
 int main(int argc, char **argv) {
 
+ printf("Server Starting...\n");
+ fflush(stdout);
     // Error check on number of arguments
     if(argc != 8){
-        printf("usage: %s port path num_dispatcher num_workers dynamic_flag queue_length cache_size\n", argv[0]);
+        printf("usage: %s <port> <path> <num_dispatcher> <num_workers> <dynamic_flag> <queue_length> <cache_size>\n", argv[0]);
         return -1;
     }
+
+ 
 
     // Get the input args
     int port =  strtol(argv[1], NULL, 10);
@@ -301,17 +315,15 @@ int main(int argc, char **argv) {
          return -1;
     }
   
-
     // Change SIGINT action for grace termination
     signal(SIGINT, handler);
 
     // Open log file
-    logfile = fopen("./web_server_log", "w");
+    logfile = fopen("./web_server_log", "w+");
     if (logfile == NULL){
       printf("ERROR: Unable to open web_server_log\n");
       return -1;
     }
-
     // Change the current working directory to server root directory
     chdir(path);
     
@@ -333,13 +345,19 @@ int main(int argc, char **argv) {
     }
     
     for(i=0; i < num_workers; i++){
-        pthread_create(&workers[i], &attr_detach, worker, NULL);
+        int *arg = malloc(sizeof(*arg)); // Pass ID as arg
+        *arg = i;
+        pthread_create(&workers[i], &attr_detach, worker, arg);
+        free(arg);
     }
 
     // Create dynamic pool manager thread (extra credit A)
     
     //to keep main from closing prematurely 
     while(1) {
+
+
+
         sleep(1);
     }
     
