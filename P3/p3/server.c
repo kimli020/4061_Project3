@@ -26,7 +26,7 @@
 */
 
 // structs:
-typedef struct request_queue {  //  This is more like a node/element in the queue
+typedef struct request_queue {
    int fd;
    char *request;
 } request_t;
@@ -37,78 +37,99 @@ typedef struct cache_entry {
     char *content;
 } cache_entry_t;
 
-/*  Queue implementation functions and structs  */
-typedef struct Queue {  //struct for the bounded size buffer
-    int front, rear, size;  // front, rear: index pointing to either end of queue     size: number of actual elements in the queue
-    unsigned capacity;    //  how many elements queue CAN hold (i.e. qlen <= MAX_QUEUE_LEN)
-    request_t* queueArray;    // Pointer to actual array where buffer is implemented
-} queue_t;
+FILE *logfile = NULL;
+int count = 0;
 
-//  Create an empty (size = 0) queue with given capacity
-//  Should be called ONCE to init a queue for buffer, then the entire program should operate around this buffer
-queue_t* createQueue(unsigned capacity)  {
-    queue_t* queue = (struct Queue*)malloc(sizeof(struct Queue));
-    queue->capacity = capacity;
-    queue->front = queue->size = 0;
-    queue->rear = capacity - 1;
-    queue->queueArray = (request_t*)malloc(queue->capacity * sizeof(request_t));
-    return queue;   //returns a pointer to queueArray
-}
-int isFull(queue_t* queue) {
-    return (queue->size == queue->capacity);
-}
-int isEmpty(queue_t* queue) {
-    return (queue->size == 0);
-}
-//  Queue: FIFO --> Add to rear, take from front
-//  Enqueue request to rear (i.e. end of queue)
-void enqueue(queue_t* queue, request_t req) {
-    if (isFull(queue))  //return, don't enqueue if queue is full
-        return;     //Maybe we want threads to block if queue is full instead?
-    queue->rear = (queue->rear + 1)%queue->capacity;  //rear++; if rear++ == capacity loops back to 0
-    queue->queueArray[queue->rear] = req;    // Push the latest request to end of queue
-    queue->size = queue->size + 1;        // size++, added one element
-    printf("%s enqueued to queue\n", req.request);
-}
+//thread
+pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t queue_mtx = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t queue_added = PTHREAD_COND_INITIALIZER;
+pthread_cond_t queue_free = PTHREAD_COND_INITIALIZER;
 
-//  Dequeue a request from front of queue, changes front and size--
-request_t dequeue(queue_t* queue)
-{
-    // if (isEmpty(queue))
-    //     return;
-    request_t req = queue->queueArray[queue->front];
-    queue->front = (queue->front + 1)% queue->capacity; // index front++; loops back to 0 if front++ reaches end of queue
-    queue->size = queue->size - 1;  //removed element -> size -= 1
-    return req;
+//  array to keep track of number of requests a worker thread has processed
+int threadTrackNum[100];
+
+
+/*  Circular queue implementation structures **********************************************/
+//  Circular queue to implement bounded buffer
+typedef struct circ_queue {
+  int rear, front; // enQueue rear, deQueue front
+  // enQueue and deQueue with capital Q's belong to this type of queue
+  int size; // current number of elements present in the queue
+  int capacity; // how many elements the circular queue could hold at maximum
+  request_t *circArray;
+} circ_queue_t;
+
+circ_queue_t ringBufferInit (int cap) {  // capacity will be qlen
+  circ_queue_t retQueue;
+  retQueue.rear = retQueue.front = -1;
+  retQueue.size = 0;
+  retQueue.capacity = cap;
+  retQueue.circArray = (request_t*) malloc((retQueue.capacity)*sizeof(request_t));
+
+  return retQueue;
 }
 
-//  Get the indexes currently being the front and rear indexes  of the queue
-int getFrontIndex(queue_t* queue)  {
-    if (isEmpty(queue))
-        return -1;
-    return queue->front;
+int enQueue(circ_queue_t *q, request_t req) {
+  pthread_mutex_lock(&queue_mtx);           //lock and wait
+
+  // Wait while queue is full
+  while ((q->front == 0 && q->rear == q->capacity-1) ||(q->rear == (q->front-1)%(q->capacity-1))) { //capacity - 1 = max index
+    pthread_cond_wait(&queue_free, &queue_mtx);
+  }
+  //  enQueue first element
+  if (q->front == -1) {
+    q->front = 0;
+    q->rear = 0;
+    q->circArray[q->rear] = req;
+    q->size++;
+  }
+  else if (q->rear == q->capacity -1 && q->front != 0) {
+    q->rear = 0;
+    q->circArray[q->rear] = req;
+    q->size++;
+  }
+  else {
+    q->rear++;
+    q->circArray[q->rear] = req;
+    q->size++;
+  }
+  pthread_cond_signal(&queue_added);
+  pthread_mutex_unlock(&queue_mtx);         //unlock;
+  return 0;
 }
 
-int getRearIndex(queue_t* queue) {
-    if (isEmpty(queue))
-        return -1;
-    return queue->rear;
+int deQueue(circ_queue_t *q, request_t *result) {
+  pthread_mutex_lock(&queue_mtx);           //lock and wait
+
+  // Wait while queue is empty
+  while (q->front == -1 || q->size == 0) {
+    pthread_cond_wait(&queue_added, &queue_mtx);
+  }
+
+  *result = q->circArray[q->front];
+  q->circArray[q->front].fd = -1; //signifies request has been processed
+  q->size--;
+
+  if(q->front == q->rear){
+    q->front = -1;
+    q->rear = -1;
+  }
+  else if (q->front == q->capacity -1)
+    q->front = 0;
+  else
+    q->front++;
+  pthread_cond_signal(&queue_free);
+  pthread_mutex_unlock(&queue_mtx);         //unlock
+  return 0;
 }
-/*********************************************************************/
 
-/*  Queue arguments struct to pass into threads */
-typedef struct queueArg {
-    queue_t* bufferQueue;  // pointer to the queue array (buffer)
-    int MQLen;    //  capacity of the queue array
-} queueArg_t;
-/*********************************************************************/
-
-int logFd;
-int pending_requests = 0;
-// request_t queue[MAX_QUEUE_LEN];     //fixed size queue
-// int queue_start = 0;
-// int queue_end = 0;
-pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER; // initiliaze to be able to lock and unlock
+/*****************************************************************************************/
+//  struct to contain arguments for threads (thread id and current ring buffer)
+typedef struct threadArg {
+  int tid;  //thread id
+  circ_queue_t *tQueue;
+} threadArg_t;
 
 
 /* ******************** Dynamic Pool Code  [Extra Credit A] **********************/
@@ -122,150 +143,149 @@ void * dynamic_pool_size_update(void *arg) {
 }
 /**********************************************************************************/
 
-/* ************************ Cache Code [Extra Credit B] **************************/
-
-// Function to check whether the given request is present in cache
-int getCacheIndex(char *request){
-  /// return the index if the request is present in the cache
-  return 0;
-}
-
-// Function to add the request and its file content into the cache
-void addIntoCache(char *mybuf, char *memory , int memory_size){
-  // It should add the request at an index according to the cache replacement policy
-  // Make sure to allocate/free memory when adding or replacing cache entries
-}
-
-// clear the memory allocated to the cache
-void deleteCache(){
-  // De-allocate/free the cache memory
-}
-
-// Function to initialize the cache
-void initCache(){
-  // Allocating memory and initializing the cache array
-}
-
-/**********************************************************************************/
-
 /* ************************************ Utilities ********************************/
 // Function to get the content type from the request
 char* getContentType(char * mybuf) {
   // Should return the content type based on the file type in the request
   // (See Section 5 in Project description for more details)
-  const char* temp = strrchr(mybuf, '.');
-  temp += 1;
 
-  char* content_type = (char*) malloc(BUFF_SIZE*sizeof(char));
 
-  if(!strcmp(temp, "html") || !strcmp(temp, "htm")){
-    strcpy(content_type, "text/html");
-  } else if (!strcmp(temp, "jpg")){
-    strcpy(content_type, "image/jpeg");
-  } else if (!strcmp(temp, "gif")){
-    strcpy(content_type, "image/gif");
-  } else {
-    strcpy(content_type, "text/plain");
-  }
-  return content_type;
+  //Strings in C are hard...code was moved to worker() function. see comments there
+    return 0;
 }
 
 // Function to open and read the file from the disk into the memory
 // Add necessary arguments as needed
 int readFromDisk(/*necessary arguments*/) {
     // Open and read the contents of file given the request
+    return 0;
 }
 
 /**********************************************************************************/
-int i, j = 1;
+
 // Function to receive the request from the client and add to the queue
-void * dispatch(void *queue) {
+void * dispatch(void *arg) {
+  char temp[BUFF_SIZE];
+  threadArg_t inArgs = *((threadArg_t *) arg);
   while (1) {
-    printf("dispatch running %d \n", i);
-    i++;
+
     // Accept client connection
     int fd = accept_connection();
-    // Get request from the client
-    if(fd > -1) { //valid fd
-      char filename[BUFF_SIZE];
-      // Add the request into the queue
-      if(get_request(fd, filename) == 0) {
-          request_t req;
-          // memset(req.request, '\0', BUFF_SIZE);
-          req.fd = fd;
-          strcpy(req.request, filename);
-          enqueue((queue_t*)queue, req);
-          // queue[queue_start] = req;
-          // if(queue_start == *(int*)qlen-1)
-          //   queue_start = 0;
-          // else
-          //   queue_start ++;
-      }
-      else{
+    if(fd < 0){
         continue;
-      }
     }
-    else{
-       continue;
+
+    // Get request from the client
+    int request = get_request(fd, temp);
+    if (request != 0) {
+      return_error(fd, "Invalid request.");
+      continue;
     }
+
+    // Add the request into the queue
+    request_t req;
+    req.fd = fd;
+    req.request = (char*) malloc(9);
+    fflush(stdout);
+    sprintf(req.request, ".%s", temp);
+    enQueue(inArgs.tQueue, req);
   }
-   return NULL;
+  return NULL;
 }
 
-/**********************************************************************************/
-
 // Function to retrieve the request from the queue, process it and then return a result to the client
-void * worker(void *queue) {
+void * worker(void *arg) {
+  // int id = *((int *) arg);
+  threadArg_t inArgs = *((threadArg_t *) arg);
+  int id = inArgs.tid;
+  request_t req;
 
-  int num_requests = 0;
   while (1) {
-    printf("worker running %d \n", j);
-    j++;
-    sleep(1);
-    //if we've handled all requests
-    // if(queue_end == queue_start) {
-    //   continue;
-    // }
-    // Get the request from the queue
-    // request_t req = queue[queue_end];
-    // if(queue_end == *(int*)qlen-1)
-    //   queue_end = 0;
-    // else
-    //   queue_end++;
-    request_t req = dequeue(queue);
-    num_requests++;
-    char* content_type = getContentType(req.request);
 
-   return_error(req.fd, content_type);    /*int return_result(int fd, char *buf)*/
+    // Get the request from the queue
+    // dequeue(&req);
+    deQueue(inArgs.tQueue, &req);
+
+    char *buffer = malloc(BUFF_SIZE);
+    strcpy(buffer,req.request);
+    threadTrackNum[id]++;
+
+    // Size of target file:
+    struct stat st;
+    stat(buffer, &st);
+    int size = st.st_size;
 
     // Get the data from the disk or the cache (extra credit B)
+    FILE *file = fopen(req.request, "r");
+    if (file == NULL) {
+      return_error(req.fd, "File not found.");
 
-    // Log the request into the file and terminal
+      printf("[%d][%d][%d][%s][%s]\n", id,threadTrackNum[id],req.fd,buffer,"File Not Found.");
+      fprintf(logfile, "[%d][%d][%d][%s][%s]\n", id,threadTrackNum[id],req.fd,buffer,"File Not Found.");
+      fflush(logfile);
+      fflush(stdout);
 
-    // return the result
-//    char* content_type = getContentType(req.request);
-//    return_result(req.fd, content_type, contents, numbytes);      //defined in utils.c
-//    free(content_type);
+      continue;
+    }
+
+ /*THE CODE BETWEEN THE ARROWS SHOULD BE IN getContentType, BUT I DON'T KNOW HOW TO PASS THINGS CORRECTLY*/
+//-->
+    char* temp = strrchr(req.request, '.');
+    if (temp == NULL) {
+      return_error(req.fd, "Can't determine file type/n");
+      fclose(file);
+      free(buffer);
+      continue;
+    }
+
+    /*THIS VERSIONS WORKS*/
+    if(strcmp(temp, ".html") == 0 ){
+      return_result(req.fd, "text/html", buffer, size);
+    } else if ( strcmp(temp, ".jpg") == 0 ){
+      return_result(req.fd, "image/jpeg", buffer, size);
+    } else if ( strcmp(temp, ".gif") == 0 ){
+      return_result(req.fd, "image/gif", buffer, size);
+    } else if( strcmp(temp, ".txt") == 0 ){
+      return_result(req.fd, "text/plain", buffer, size);
+    } else {
+      printf("error getting file type \n");
+      fclose(file);
+      free(buffer);
+      continue;
+
+    }
+
+    // Output: [threadId][reqNum][fd][Request string][bytes/error][Cache HIT/MISS] , Cache not implemented
+
+    printf("[%d][%d][%d][%s][%d]\n", id,threadTrackNum[id],req.fd,buffer,size);
+    fprintf(logfile, "[%d][%d][%d][%s][%d]\n", id,threadTrackNum[id],req.fd,buffer,size);
+    fflush(logfile);
+    fflush(stdout);
+//-->
+
+    fclose(file);
+    free(buffer);
   }
   return NULL;
 }
 
 
 /**********************************************************************************/
-// Will always close the program when called at end of main, not what we want
-// Will be called when ^C is pressed, terminate the server --> what we want
 void handler(int signal){
-  printf("Number of pending requests : %d \n", pending_requests);
-  close(logFd);
+  printf("\nServer stopping...\n");
+  printf("\nNumber of pending requests : %d \n", count);
+  fclose(logfile);
   exit(0);
 }
 
 /**********************************************************************************/
 int main(int argc, char **argv) {
 
+ printf("Server Starting...\n");
+ fflush(stdout);
     // Error check on number of arguments
     if(argc != 8){
-        printf("usage: %s port path num_dispatcher num_workers dynamic_flag queue_length cache_size\n", argv[0]);
+        printf("usage: %s <port> <path> <num_dispatcher> <num_workers> <dynamic_flag> <queue_length> <cache_size>\n", argv[0]);
         return -1;
     }
 
@@ -284,26 +304,31 @@ int main(int argc, char **argv) {
         printf("ERROR: Port # must be between 1025 and 65535 \n");
         return -1;
     }
+
     //Check # of dispatchers
     if (num_dispatchers < 1 || num_dispatchers > MAX_THREADS) {
         printf("Number of dispatchers must be between 1 and %i\n", MAX_THREADS);
         return -1;
     }
+
     //Check # of workers
     if (num_workers < 1 || num_workers > MAX_THREADS) {
         printf("Number of workers must be between 1 and %i\n", MAX_THREADS);
         return -1;
     }
+
     //check dynamic flag
     if (dynamic_flag != 0 && dynamic_flag != 1) {
         printf("ERROR: Dynamic flag should be 0 or 1. (static or dynamic worker thread pool)\n");
         return -1;
     }
+
     //Check qlen
     if (qlen < 1 || qlen > MAX_QUEUE_LEN) {
         printf("Request queue length must be between 1 and %i\n", MAX_QUEUE_LEN);
         return -1;
     }
+
     //Checks cache_entries
     if (cache_entries < 0 || cache_entries > MAX_CE) {
         printf("Number of cache entries must be between 1 and %i\n", MAX_CE);
@@ -311,31 +336,34 @@ int main(int argc, char **argv) {
     }
 
     // Change SIGINT action for grace termination
-    struct sigaction act;
-    act.sa_handler = handler;
-    act.sa_flags = 0;
-    if(sigemptyset(&act.sa_mask) == -1 || sigaction(SIGINT, &act, NULL) == -1){
-        printf("Failed to set SIGINT handler.\n");
-        return -1;
-    }
+    signal(SIGINT, handler);
 
     // Open log file
-    logFd = open("web_server_log", O_CREAT | O_WRONLY, 0777);
-    if (logFd < 0){
-      printf("ERROR: Unable to create web_server_log file \n");
+    logfile = fopen("./web_server_log", "w+");
+    if (logfile == NULL){
+      printf("ERROR: Unable to open web_server_log\n");
       return -1;
     }
     // Change the current working directory to server root directory
     chdir(path);
+
+    // init the threadTrackNum array
+    for(int i=0; i<MAX_QUEUE_LEN; i++)  {
+      threadTrackNum[i] = 0;
+    }
+
     // Initialize cache (extra credit B)
 
-    // Create the buffer queue and init queueArg arguments
-    queue_t* queue = createQueue(qlen);
-    queueArg_t queueArgs;
-    queueArgs.bufferQueue = queue;
-    queueArgs.MQLen = qlen;
     // Start the server
     init(port);
+
+    //  Init the ring buffer queue
+    circ_queue_t ringQueue = ringBufferInit(qlen);
+    circ_queue_t *ringQueuePtr = &ringQueue;
+    //
+    threadArg_t dispArg[qlen];
+    threadArg_t workArg[qlen];
+
     // Create dispatcher and worker threads (all threads should be detachable)
     pthread_t dispatchers[num_dispatchers];
     pthread_t workers[num_workers];
@@ -345,23 +373,33 @@ int main(int argc, char **argv) {
 
     int i;
     for(i=0; i < num_dispatchers; i++){
-        pthread_create(&dispatchers[i], &attr_detach, dispatch, queue);
+        dispArg[i].tid = i;
+        dispArg[i].tQueue = ringQueuePtr;
+        pthread_create(&dispatchers[i], &attr_detach, dispatch, &dispArg[i]);
     }
 
     for(i=0; i < num_workers; i++){
-        pthread_create(&workers[i], &attr_detach, worker, queue);
+        // int *arg = malloc(sizeof(*arg)); // Pass ID as arg
+        // *arg = i;
+        workArg[i].tid = i;
+        workArg[i].tQueue = ringQueuePtr;
+        pthread_create(&workers[i], &attr_detach, worker, &workArg[i]);
+        // free(arg);
     }
 
     // Create dynamic pool manager thread (extra credit A)
 
-    // Terminate server gracefully
-    while(1){
-      // handler(SIGINT);
+    //to keep main from closing prematurely
+    while(1) {
+
+        sleep(1);
     }
 
+/*Mostly sure the following requirements should all should be done in handler()*/
+
+    // Terminate server gracefully
     // Print the number of pending requests in the request queue
     // close log file
-    //fclose(log_file);
     // Remove cache (extra credit B)
 
     return 0;
