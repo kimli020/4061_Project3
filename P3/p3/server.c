@@ -38,7 +38,7 @@ typedef struct cache_entry {
 } cache_entry_t;
 
 FILE *logfile = NULL;
-int count = 0;
+int count; //number of pending requests, ++ for enQueue, -- for deQueue
 
 //thread
 pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;    //previously unused, now used for logging
@@ -67,6 +67,7 @@ circ_queue_t ringBufferInit (int cap) {  // capacity will be qlen
   retQueue.size = 0;
   retQueue.capacity = cap;
   retQueue.circArray = (request_t*) malloc((retQueue.capacity)*sizeof(request_t));
+  memset(retQueue.circArray, '\0', (retQueue.capacity)*sizeof(request_t));
 
   return retQueue;
 }
@@ -78,23 +79,30 @@ int enQueue(circ_queue_t *q, request_t req) {
   while ((q->front == 0 && q->rear == q->capacity-1) ||(q->rear == (q->front-1)%(q->capacity-1))) { //capacity - 1 = max index
     pthread_cond_wait(&queue_free, &queue_mtx);
   }
+  // while (q->size == 0) {
+  //   pthread_cond_wait(&queue_free, &queue_mtx);
+  // }
   //  enQueue first element
   if (q->front == -1) {
     q->front = 0;
     q->rear = 0;
     q->circArray[q->rear] = req;
     q->size++;
+    count++;
   }
   else if (q->rear == q->capacity -1 && q->front != 0) {
     q->rear = 0;
     q->circArray[q->rear] = req;
     q->size++;
+    count++;
   }
   else {
     q->rear++;
     q->circArray[q->rear] = req;
     q->size++;
+    count++; //queued requests++
   }
+  // printf("Enqueue count: %d \n", count); //debug statement
   pthread_cond_signal(&queue_added);
   pthread_mutex_unlock(&queue_mtx);         //unlock;
   return 0;
@@ -104,13 +112,14 @@ int deQueue(circ_queue_t *q, request_t *result) {
   pthread_mutex_lock(&queue_mtx);           //lock and wait
 
   // Wait while queue is empty
-  while (q->front == -1 || q->size == 0) {
+  while (q->front == -1) {
     pthread_cond_wait(&queue_added, &queue_mtx);
   }
 
   *result = q->circArray[q->front];
   // q->circArray[q->front].fd = -1; //signifies request has been processed
   q->size--;
+  count--; //queued requests--
 
   if(q->front == q->rear){
     q->front = -1;
@@ -137,7 +146,11 @@ typedef struct threadArg {
 /* ******************** Dynamic Pool Code  [Extra Credit A] **********************/
 // Extra Credit: This function implements the policy to change the worker thread pool dynamically
 // depending on the number of requests
+
+// Base version:  This code is commented out, dynamic_pool_size_update() is never called and does not affect program output or performance
+//  Extra Credit A attempted version (or EA version): this code is called when dynamic == 1, else it should behave like the Base version
 void * worker(void *arg);
+void handler(int signal);
 
 typedef struct dynamicArgument{
   pthread_t *workerPtr;
@@ -150,52 +163,59 @@ void *dynamic_pool_size_update(void *arg) {
   while(1) {
     // Run at regular intervals
     // Increase / decrease dynamically based on your policy
-    // dynamicArg_t inArgs = *(dynamicArg_t*) arg;
-    // pthread_t *workerPtr = inArgs.workerPtr;
-    // threadArg_t *workArgPtr = inArgs.workArgPtr;
-    // pthread_attr_t threadAttr = inArgs.threadAttr;
-    // int queueLen = inArgs.queueLen;
-    //
-    //
-    // int currentSize = workArgPtr->tQueue->size;
-    // int hasAdded = 0;
-    // int hasDeleted = 0;
-    // // printf("%d, %d \n", currentSize, noActive;
-    //
-    // if (activeWorkers == 10 || activeWorkers == currentSize/10)
-    //   continue;
-    // else if(activeWorkers < (currentSize/10)) {  //need more workers
-    //   for(int i=0; i<queueLen; i++) {
-    //     if((signed long)workerPtr[i] == -1 && activeWorkers < (currentSize/10)) { //force pthread_t at this index to be interpreted as signed (deletion will force pthread_t to -1)
-    //       pthread_create(&workerPtr[i], &threadAttr, worker, &workArgPtr[i]);
-    //       activeWorkers++;
-    //       hasAdded++;
-    //     }
-    //     else if(activeWorkers == currentSize/10)
-    //       break;
-    //   }
-    //   if(hasAdded > 0) {
-    //     printf("Created %d worker threads because number of workers < 1/10 number of queued requests \n", hasAdded);
-    //     printf("Current number of workers: %d \n", activeWorkers);
-    //   }
-    // }
-    //
-    // else if(activeWorkers > (currentSize/10)) {   // too many workers
-    //   for(int i=queueLen-1; i>0; i++) {
-    //     if(workerPtr[i] > -1 && (activeWorkers > (currentSize/10) || activeWorkers > 10)) { //force pthread_t at this index to be interpreted as signed (deletion will force pthread_t to -1)
-    //       pthread_cancel(workerPtr[i]);
-    //       workerPtr[i] = -1;
-    //       activeWorkers--;
-    //       hasDeleted++;
-    //     }
-    //     else if(activeWorkers == currentSize/10 || activeWorkers == 10)  //must always have at least 1 active worker
-    //       break;
-    //   }
-    //   if(hasDeleted > 0){
-    //     printf("Deleted %d worker threads because number of workers > 1/10 number of queued requests \n", hasDeleted);
-    //     printf("Current number of workers: %d \n", activeWorkers);
-    //   }
-    // }
+
+    // pthread_mutex_lock(&queue_mtx);         //unlock
+
+    dynamicArg_t inArgs = *(dynamicArg_t*) arg;
+    pthread_t *workerPtr = inArgs.workerPtr;
+    threadArg_t *workArgPtr = inArgs.workArgPtr;
+    pthread_attr_t threadAttr = inArgs.threadAttr;
+    int queueLen = inArgs.queueLen;
+
+
+    int currentSize = workArgPtr->tQueue->size;
+    int hasAdded = 0;
+    int hasDeleted = 0;
+    // printf("%d, %d \n", currentSize, noActive;
+
+    if(activeWorkers < (currentSize/10)) {  //need more workers
+      for(int i=0; i<queueLen; i++) {
+        if((signed long)workerPtr[i] == -1 && activeWorkers < (currentSize/10)) { //force pthread_t at this index to be interpreted as signed (deletion will force pthread_t to -1)
+          pthread_create(&workerPtr[i], &threadAttr, worker, &workArgPtr[i]);
+          activeWorkers++;
+          hasAdded++;
+        }
+        else if(activeWorkers == currentSize/10)
+          break;
+      }
+      if(hasAdded > 0) {
+        printf("Created %d worker threads because number of workers < 1/10 number of queued requests \n", hasAdded);
+        printf("Current number of workers: %d \n", activeWorkers);
+      }
+    }
+
+    if(workArgPtr->tQueue->size) {
+        if (activeWorkers == 10 || activeWorkers == currentSize/10)
+          continue;
+
+        else if(activeWorkers > (currentSize/10)) {   // too many workers
+          for(int i=queueLen-1; i>1; i++) {
+            if((signed long)workerPtr[i] > -1 && (activeWorkers > (currentSize/10) && activeWorkers > 10)) { //force pthread_t at this index to be interpreted as signed (deletion will force pthread_t to -1)
+              pthread_cancel(workerPtr[i]);
+              workerPtr[i] = -1;
+              activeWorkers--;
+              hasDeleted++;
+            }
+            else if(activeWorkers == (currentSize/10) || activeWorkers == 10)  //must always have at least 1 active worker
+              break;
+          }
+          if(hasDeleted > 0){
+            printf("Deleted %d worker threads because number of workers > 1/10 number of queued requests \n", hasDeleted);
+            printf("Current number of workers: %d \n", activeWorkers);
+          }
+        }
+      }
+      // pthread_mutex_unlock(&queue_mtx);         //unlock
   }
 }
 /**********************************************************************************/
@@ -222,6 +242,7 @@ int readFromDisk(/*necessary arguments*/) {
 
 // Function to receive the request from the client and add to the queue
 void * dispatch(void *arg) {
+
   char temp[BUFF_SIZE];
   threadArg_t inArgs = *((threadArg_t *) arg);
   while (1) {
@@ -239,10 +260,13 @@ void * dispatch(void *arg) {
       continue;
     }
 
+    // printf("Request in dispatch: %s \n", temp);  // debug line
+    // printf("Enqueue count: %d \n", count);
+
     // Add the request into the queue
     request_t req;
     req.fd = fd;
-    req.request = (char*) malloc(9);
+    req.request = (char*) malloc(sizeof(char)*BUFF_SIZE);
     fflush(stdout);
     sprintf(req.request, ".%s", temp);
     enQueue(inArgs.tQueue, req);
@@ -252,6 +276,7 @@ void * dispatch(void *arg) {
 
 // Function to retrieve the request from the queue, process it and then return a result to the client
 void * worker(void *arg) {
+
   // int id = *((int *) arg);
   threadArg_t inArgs = *((threadArg_t *) arg);
   int id = inArgs.tid;
@@ -269,14 +294,15 @@ void * worker(void *arg) {
 
     pthread_mutex_lock(&mtx);
 
-    char *buffer = malloc(BUFF_SIZE);
-    strcpy(buffer,req.request);
+    // printf("Request in worker: %s \n", req.request);  //debug line
     threadTrackNum[id]++;
 
     // Size of target file:
     struct stat st;
-    stat(buffer, &st);
+    stat(req.request, &st);
     int size = st.st_size;
+    // printf("Buffer size: %d \n", size);  //debug line
+    char *buffer = (char*) malloc(sizeof(char)*size);
 
     // Get the data from the disk or the cache (extra credit B)
 
@@ -285,8 +311,8 @@ void * worker(void *arg) {
     if (file == NULL) {
       return_error(req.fd, "File not found.");
 
-      printf("[%d][%d][%d][%s][%s]\n", id,threadTrackNum[id],req.fd,buffer,"File Not Found.");
-      fprintf(logfile, "[%d][%d][%d][%s][%s]\n", id,threadTrackNum[id],req.fd,buffer,"File Not Found.");
+      printf("[%d][%d][%d][%s][%s]\n", id,threadTrackNum[id],req.fd,req.request,"File Not Found.");
+      fprintf(logfile, "[%d][%d][%d][%s][%s]\n", id,threadTrackNum[id],req.fd,req.request,"File Not Found.");
       fflush(logfile);
       fflush(stdout);
 
@@ -322,8 +348,8 @@ void * worker(void *arg) {
 
     // Output: [threadId][reqNum][fd][Request string][bytes/error][Cache HIT/MISS] , Cache not implemented
 
-    printf("[%d][%d][%d][%s][%d]\n", id,threadTrackNum[id],req.fd,buffer,size);
-    fprintf(logfile, "[%d][%d][%d][%s][%d]\n", id,threadTrackNum[id],req.fd,buffer,size);
+    printf("[%d][%d][%d][%s][%d]\n", id,threadTrackNum[id],req.fd,req.request,size);
+    fprintf(logfile, "[%d][%d][%d][%s][%d]\n", id,threadTrackNum[id],req.fd,req.request,size);
     fflush(logfile);
     fflush(stdout);
 //-->
@@ -413,6 +439,7 @@ int main(int argc, char **argv) {
     }
     // Change the current working directory to server root directory
     chdir(path);
+    printf("Root path: %s \n", path);
 
     // init the threadTrackNum array
     for(int i=0; i<MAX_QUEUE_LEN; i++)  {
@@ -423,6 +450,7 @@ int main(int argc, char **argv) {
 
     // Start the server
     init(port);
+    count = 0;
 
     //  Init the ring buffer queue
     circ_queue_t ringQueue = ringBufferInit(qlen);
@@ -457,32 +485,21 @@ int main(int argc, char **argv) {
         activeWorkers++;
         // free(arg);
     }
-    // printf("%ld \n", workers[1]);
-    // printf("Force overlap of thread creation \n");
-    // pthread_create(&workers[1], &attr_detach, worker, &workArg[1]);
-    // printf("%ld \n", workers[1]);
-    // workers[1] = -1;
-    // printf("%ld \n", (long)workers[1]);
-
-    // printf("Before %lu \n", workers[3]);
-    // pthread_cancel(workers[3]);
-    // workers[3] = -1;
-    // printf("After %ld \n", (long)workers[3]);
-    // workers[i] keeps pthread_t id value after pthread_cancel call
-
 
     // Create dynamic pool manager thread (extra credit A)
-    // if(dynamic_flag){
-    //   pthread_t dynamic;
-    //   dynamicArg_t dynamicArg;
-    //   dynamicArg.workerPtr = workerPtr;
-    //   dynamicArg.workArgPtr = workArgPtr;
-    //   dynamicArg.threadAttr = attr_detach;
-    //   dynamicArg.queueLen = qlen;
-    //   // dynamic_pool_size_update(workerPtr, workArgPtr, attr_detach, qlen);
-    //   pthread_create(&dynamic, &attr_detach, dynamic_pool_size_update, &dynamicArg);
-    // }
-    //to keep main from closing prematurely
+    //  Note: This is an incomplete/incorrect implementation of the dynamic pool, the server will not work correctly with dynamic_flag once
+    //  Setting dynamic_flag = 0 will prevent this code from being called and keep the server operations to normal
+    if(dynamic_flag){
+      pthread_t dynamic;
+      dynamicArg_t dynamicArg;
+      dynamicArg.workerPtr = workerPtr;
+      dynamicArg.workArgPtr = workArgPtr;
+      dynamicArg.threadAttr = attr_detach;
+      dynamicArg.queueLen = qlen;
+      // dynamic_pool_size_update(workerPtr, workArgPtr, attr_detach, qlen);
+      pthread_create(&dynamic, &attr_detach, dynamic_pool_size_update, &dynamicArg);
+    }
+    // to keep main from closing prematurely
     while(1) {
       // pthread_t *workerPtr;
       // threadArg_t *workArgPtr;
